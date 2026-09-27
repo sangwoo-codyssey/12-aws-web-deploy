@@ -1,0 +1,15 @@
+.DS_Store
+.idea/
+.vscode/
+
+# --- 자격증명 · 키 (절대 커밋 금지) ---
+# EC2 키페어는 재발급이 안 되고, 올라가면 인스턴스가 즉시 노출된다.
+*.pem
+*.ppk
+*.key
+.aws/
+credentials
+
+# --- 로컬 전용 (원격과 동일하게 가므로 애초에 커밋하지 않는다) ---
+HANDOFF.md
+plans/
