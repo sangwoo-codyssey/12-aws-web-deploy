@@ -8,7 +8,8 @@
 | [T-ALB](#t-alb--https-리스너-추가가-accessdenied-후-롤백) | HTTPS 리스너 추가가 AccessDenied 후 롤백 | 권한 (IAM 최소권한) | 실제 발생 | 19:5x ~ 20:14 |
 
 - 발췌한 로그는 실행한 명령과 출력을 그대로 옮겼다. 가린 값은 계정 ID(`************`)와 내 공인 IP(`x.x.x.x`) 두 가지뿐이다.
-  원본 로그는 레포에 올리지 않았다.
+  원본 로그 파일은 계정 ID · 내 IP · 인스턴스 메타데이터 토큰이 들어 있어 레포에 올리지 않았다.
+  대신 판단에 쓴 명령과 출력을 본문과 접힌 "원본 발췌"에 블록째 옮겼다.
 - 캡처는 [`screenshots/`](../screenshots/)에 있다. 구성 전체는 [`architecture.png`](architecture.png)(1단계)와 [`architecture-extended.png`](architecture-extended.png)(2단계)에 그렸다.
 
 ---
@@ -66,7 +67,69 @@ nc: connectx to 52.79.161.105 port 22 (tcp) failed: Operation timed out
 
 **H1 기각** (16:14:08) — `running`, System · Instance · EBS 상태 모두 `ok`(콘솔 "3/3 검사 통과"), 공인 IP 52.79.161.105 할당됨. +211초 재시도도 같았으므로 부팅 지연도 아니다.
 
+<details>
+<summary>원본 발췌 — 인스턴스 상태 · 네트워크</summary>
+
+```
+== t1 · check1 instance · 2026-10-15 16:14:08 KST ==
+$ aws ec2 describe-instance-status --instance-ids i-092b6a3c00bbee442
+[
+    {
+        "State": "running",
+        "SystemStatus": "ok",
+        "InstanceStatus": "ok",
+        "EbsStatus": "ok",
+        "Details": [
+            [
+                {
+                    "Name": "reachability",
+                    "Status": "passed"
+                }
+            ],
+            [
+                {
+                    "Name": "reachability",
+                    "Status": "passed"
+                }
+            ]
+        ]
+    }
+]
+$ aws ec2 describe-instances --instance-ids i-092b6a3c00bbee442 (network)
+[
+    {
+        "PublicIp": "52.79.161.105",
+        "PublicDns": "ec2-52-79-161-105.ap-northeast-2.compute.amazonaws.com",
+        "PrivateIp": "10.0.1.100",
+        "SubnetId": "subnet-020964110159af855"
+    }
+]
+```
+
+</details>
+
 **H2 기각** (16:16:24) — `igw-057393382633edab5` 가 `lab-vpc` 에 `available` 로 붙어 있다.
+
+<details>
+<summary>원본 발췌 — IGW 연결</summary>
+
+```
+== t1 · check2 internet gateway · 2026-10-15 16:16:24 KST ==
+$ aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=vpc-04b89b36a6e5f95b3
+[
+    {
+        "Id": "igw-057393382633edab5",
+        "Attachments": [
+            {
+                "State": "available",
+                "VpcId": "vpc-04b89b36a6e5f95b3"
+            }
+        ]
+    }
+]
+```
+
+</details>
 
 **H3 기각** (16:16:24) — 규칙이 의도대로 들어 있다. 22 출처가 지금 내 PC 의 공인 IP 와 같은 것도 확인했다.
 
@@ -84,6 +147,52 @@ x.x.x.x
 (바깥 괄호와 앞의 `Id`·`Name` 줄은 빼고, 규칙마다 JSON 을 한 줄로 접었다. 값은 원본과 같다.)
 
 **H4 기각** (16:16:25) — 서브넷에 붙은 NACL 은 기본 NACL(`IsDefault: true`)이다. 인바운드·아웃바운드 모두 규칙 100 이 전체 allow 다.
+
+<details>
+<summary>원본 발췌 — NACL 규칙</summary>
+
+```
+== t1 · check4 network acl · 2026-10-15 16:16:25 KST ==
+$ aws ec2 describe-network-acls --filters Name=association.subnet-id,Values=subnet-020964110159af855
+[
+    {
+        "Id": "acl-0a89c2d8c7480580c",
+        "IsDefault": true,
+        "Entries": [
+            {
+                "Rule": 100,
+                "Egress": true,
+                "Proto": "-1",
+                "Cidr": "0.0.0.0/0",
+                "Action": "allow"
+            },
+            {
+                "Rule": 32767,
+                "Egress": true,
+                "Proto": "-1",
+                "Cidr": "0.0.0.0/0",
+                "Action": "deny"
+            },
+            {
+                "Rule": 100,
+                "Egress": false,
+                "Proto": "-1",
+                "Cidr": "0.0.0.0/0",
+                "Action": "allow"
+            },
+            {
+                "Rule": 32767,
+                "Egress": false,
+                "Proto": "-1",
+                "Cidr": "0.0.0.0/0",
+                "Action": "deny"
+            }
+        ]
+    }
+]
+```
+
+</details>
 
 **H5 채택** (16:16:26) — 이 서브넷을 명시적으로 연결한 라우트 테이블이 **없다**. 명시 연결이 없는 서브넷은 VPC 의 기본(main) 라우트 테이블을 쓴다.
 그런데 기본 라우트 테이블에는 `local` 경로 하나뿐이다.
@@ -157,6 +266,17 @@ $ grep -n -E 'dnf install|Curl error \(28\)' t1-7-check6-console-output.txt | he
    여러 포트가 동시에 타임아웃이면 경로부터 본다.
 4. **배포 확인은 "접속된다"에서 끝내지 않는다.** User data 가 네트워크에 기대는 작업(패키지 설치)을 하다 실패하면 재부팅해도 다시 돌지 않는다.
    `systemctl is-active nginx`, `/var/log/cloud-init-output.log` 로 설치 결과를 따로 확인한다.
+
+**점검 명령** — 외부 접속이 타임아웃일 때 바깥에서 안쪽 순서로 실행한다. 이번 T1 에서 쓴 명령 그대로다(`--profile`·`--region` 생략).
+
+```bash
+aws ec2 describe-instance-status --instance-ids <인스턴스>                                  # 1 인스턴스 상태 검사
+aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=<VPC>            # 2 IGW 가 VPC 에 붙어 있나
+aws ec2 describe-security-groups --group-ids <SG>                                           # 3 인바운드 포트 · 출처
+aws ec2 describe-network-acls --filters Name=association.subnet-id,Values=<서브넷>          # 4 NACL deny 규칙
+aws ec2 describe-route-tables --filters Name=association.subnet-id,Values=<서브넷>          # 5 [] 이면 기본 라우트 테이블을 쓰는 중
+aws ec2 get-console-output --instance-id <인스턴스> --latest --output text                  # 6 부팅 로그 — 안에서 밖으로도 막혔나
+```
 
 캡처: [`t1-1-resource-map-before.png`](../screenshots/t1-1-resource-map-before.png) ·
 [`t1-2-check1-instance.png`](../screenshots/t1-2-check1-instance.png) ·

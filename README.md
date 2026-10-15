@@ -1,6 +1,6 @@
 # 12 - 내가 만든 웹사이트를 인터넷에 올려 누구나 쓰게 하기 (AWS Web Deploy)
 
-> ✅ **구축·검증 완료 (2026-10-15)** · 리소스 정리는 과제 완료 선언 때 [`docs/cleanup-checklist.md`](docs/cleanup-checklist.md) 순서대로 진행
+> ✅ **구축·검증 완료 (2026-10-15)** · 리소스는 평가가 끝날 때까지 유지하고, 그 뒤 [`docs/cleanup-checklist.md`](docs/cleanup-checklist.md) 순서대로 정리한다(현재 **정리 전**)
 
 VPC 로 격리된 네트워크를 직접 만들고, EC2 에 Nginx 를 올려 **외부에서 접속 가능한** 웹 서비스를 완성했다.
 과제가 요구하는 구성(퍼블릭 EC2 1대)을 먼저 만들어 증빙을 남겼다. 그다음 같은 VPC 를 운영형 구성으로 넓혔다.
@@ -20,6 +20,8 @@ VPC 로 격리된 네트워크를 직접 만들고, EC2 에 Nginx 를 올려 **�
 | 4 | 리소스 정리 체크리스트 | [`docs/cleanup-checklist.md`](docs/cleanup-checklist.md) |
 
 ![1단계 필수 구성](docs/architecture.png)
+
+*▲ 트래픽 흐름: ① 방문자 → ② Internet Gateway(공인 52.79.161.105 → 사설 10.0.1.100) → ③ `lab-public-a` 서브넷 → ④ `public-sg` 판정(80 허용) → ⑤ EC2 의 Nginx. 응답은 `public-rt` 의 `0.0.0.0/0 → lab-igw` 로 나간다.*
 
 ## 외부 접속 검증 — 방식 (B)
 
@@ -50,6 +52,19 @@ OK
   그래서 지금 이 주소로 들어가면 타임아웃이 난다. 이후 웹 서비스 주소는 `https://m12.crypbot.app` 이다([확장 구성](#확장-구성-2단계)).
 - 리소스를 정리하면 두 주소 모두 동작하지 않는다. 위 캡처가 증빙이다.
 
+**방식 (B) 를 고른 이유** — 상태 코드(`200 OK`)와 고정 본문(`OK`)이 글자로 남는다. 그래서 명령 · 시각 · 응답을 캡처 한 장에 담을 수 있다.
+같은 `/health` 경로를 2단계에서는 ALB 의 상태 검사 경로로 그대로 썼다. (A) 브라우저 화면은 주소창이 캡처에 찍히지 않아 어느 주소로 접속했는지 보이지 않는다.
+그래서 같은 IP 의 브라우저 캡처([`phase1-browser-root.png`](screenshots/phase1-browser-root.png))는 보조 증빙으로만 남겼다.
+
+**접속 경로 — 1단계와 2단계의 차이**
+
+| | 1단계 (필수) | 2단계 (확장) |
+|---|---|---|
+| 주소 | `http://52.79.161.105` — EC2 의 공인 IP | `https://m12.crypbot.app` — Route 53 별칭 A → ALB |
+| 경로 | 내 PC → IGW → `lab-public` 의 Nginx (인스턴스가 직접 응답) | 내 PC → IGW → ALB 노드(공인 IP 2개) → `lab-web` 사설 IP:80 → 컨테이너 |
+| 응답 헤더 `Server` | `nginx/1.30.5` | `/health` 는 `nginx/1.27.5`(컨테이너), `http://` 리다이렉트는 `awselb/2.0`(ALB) |
+| 주소가 바뀌는 경우 | 인스턴스를 새로 만들면 공인 IP 가 바뀐다 | ALB 노드 IP 는 바뀔 수 있지만, 도메인이 ALB 를 가리키므로 주소는 그대로다 |
+
 ## 구성 (1단계 · 필수)
 
 | 항목 | 값 |
@@ -64,7 +79,14 @@ OK
 | OS | Amazon Linux 2023 |
 | EBS | gp3 8 GiB |
 | 웹 서버 | Nginx 1.30.5 — User data 스크립트([`scripts/user-data-public.sh`](scripts/user-data-public.sh))로 설치(첫 부팅 때는 실패 → [T1](docs/troubleshooting.md#t1--공인-ip-로-접속하면-타임아웃) 수정 후 재실행), `/health` → `200 OK` |
-| 키 페어 | `lab-key` (ED25519) — `.pem` 은 레포 밖에 보관 |
+| 키 페어 | `lab-key` (ED25519) — `.pem` 은 레포 밖 로컬 폴더에 두고 권한 `400`(소유자 읽기만). 레포는 `.gitignore` 로 `*.pem` · `*.key` 를 막는다. 2단계에서도 bastion 에 복사하지 않았다(ProxyJump) |
+
+**라우팅 연결 요약** — `lab-public-a` → `public-rt`(명시 연결) → `0.0.0.0/0` → `lab-igw`.
+2단계에서는 `lab-public-c` 도 `public-rt` 에, `lab-private-a` 는 `private-rt`(`0.0.0.0/0` → `lab-nat`)에 연결했다.
+기본 라우트 테이블(`local` 만)에 남은 서브넷은 없다([`phase3-1-public-rt-associations.png`](screenshots/phase3-1-public-rt-associations.png) · [`phase2-4-route-tables.png`](screenshots/phase2-4-route-tables.png)).
+
+**아웃바운드가 필요한 이유** — 첫 부팅 때 User data 가 `dnf install -y nginx` 로 패키지 저장소(S3, HTTPS)에서 Nginx 를 받는다.
+`0.0.0.0/0 → lab-igw` 가 없던 [T1](docs/troubleshooting.md#t1--공인-ip-로-접속하면-타임아웃) 에서는 이 설치가 타임아웃으로 실패했다.
 
 웹 페이지(`/`)에는 응답한 인스턴스의 ID · AZ · 사설 IP 가 찍힌다. 캡처만 봐도 어느 서버가 응답했는지 알 수 있게 했다.
 
@@ -87,7 +109,7 @@ OK
 | `0.0.0.0/0` 전체 포트 허용 규칙 없음 | 같은 SG 캡처 (전체 포트 규칙 없음) |
 | IAM 사용자 1개, EC2/VPC/SG 범위로 제한, S3/RDS 권한 없음, 관리자 권한 없음 | `lab-user` + 고객 관리형 정책 `lab-m12`. 필수 범위(EC2 · VPC · SG)에 확장 구성용 ELB · ACM · Route 53 · SSM action 만 더했고, 서울 리전으로 고정했다. S3 · RDS 권한과 관리자 권한은 없다 — [IAM 최소권한](#iam-최소권한) · [`phase1-iam-deny.png`](screenshots/phase1-iam-deny.png) |
 | 외부 접속 검증(택 1) + README 에 명시 | 방식 (B) — [위](#외부-접속-검증--방식-b) |
-| 실습 종료 후 정리 · 근거 | [`docs/cleanup-checklist.md`](docs/cleanup-checklist.md) — **정리 전**(과제 완료 선언 때 진행) |
+| 실습 종료 후 정리 · 근거 | [`docs/cleanup-checklist.md`](docs/cleanup-checklist.md) — **정리 전**(평가 후 정리하고 확인 칸에 근거 기입) |
 
 ## 보안 그룹
 
@@ -99,14 +121,19 @@ OK
 | `web-sg` | `lab-web` | 22 ← **`bastion-sg`** · 80 ← **`alb-sg`** | 출처를 IP 대역이 아니라 **보안 그룹**으로 지정했다. ALB 노드 IP 는 바뀌고, 서브넷 대역(`10.0.1.0/24`)으로 열면 같은 서브넷의 NAT 까지 허용된다 |
 
 - 아웃바운드는 모두 기본값(전체 허용)이다.
-- `web-sg` 의 설명 문구는 `m12 web - SSH from bastion-sg only` 로 남아 있다. 만든 뒤 80 ← alb-sg 를 더해서 지금은 사실과 다르다.
-  보안 그룹 설명은 생성 후 바꿀 수 없다.
+- **22 출처 IP** — 접속한 장소(교육장)의 공인 IP 하나를 `/32` 로 넣었다(`checkip.amazonaws.com` 으로 확인). 장소가 바뀌어 IP 가 달라지면 22 는 타임아웃이 난다([다른 네트워크 시험](screenshots/phase1-other-network-ssh.png)).
+  그때는 규칙을 새 `/32` 로 바꾸거나, 인바운드 포트 없이 접속하는 Session Manager 를 쓴다(2단계 `lab-web`).
+- **변경 이력** — `public-sg` 는 2단계에서 `lab-public` 에서 떼어 냈다(연결 없이 남겨 두고 정리 때 삭제). `web-sg` 는 만들 때 22 ← bastion-sg 하나였고, 3단계에서 80 ← alb-sg 를 더했다.
+- 그래서 `web-sg` 의 설명 문구는 `m12 web - SSH from bastion-sg only` 로 남아 지금은 사실과 다르다. 보안 그룹 설명은 생성 후 바꿀 수 없으므로 실제 규칙은 위 표를 기준으로 본다.
 
 ## IAM 최소권한
 
 **Security Group 과 IAM 은 지키는 대상이 다르다.** 보안 그룹은 **네트워크 패킷**을 거른다. 누가 어느 포트로 인스턴스에 들어올 수 있는지를 정한다.
 IAM 은 **AWS API 호출**을 거른다. 누가 어떤 AWS 작업(인스턴스 생성, SG 수정 등)을 할 수 있는지를 정한다.
 SG 를 잘 막아도 IAM 이 넓으면 누군가 SG 자체를 열 수 있다. 그래서 둘 다 최소로 둔다.
+
+**변경 흐름** — SG 규칙은 `lab-user` 가 콘솔에서 바꾼다(정책이 허용하는 범위). IAM 정책은 `lab-user` 가 바꿀 수 없다.
+작업이 거부되면 거부 메시지로 필요한 action 을 확인하고, 루트가 그 action 하나만 더한 새 버전을 저장한다. 그다음 [기능으로 반영을 확인](#권한을-바꾼-뒤의-확인)한다.
 
 ### 실습 계정 구성
 
@@ -166,6 +193,16 @@ SSO(역할)로 바꾸면 `EndOwnSessionsIamUser` 는 다시 손봐야 한다. �
 
 *▲ `lab-user` 로 실행한 거부 시험 9종 (계정 ID 만 가림)*
 
+### 권한을 바꾼 뒤의 확인
+
+`lab-user` 는 IAM 정책을 읽을 수 없다. 그래서 정책 반영은 **실패해야 할 것과 성공해야 할 것을 짝으로 실행**해 기능으로 확인했다.
+
+| 확인 대상 | 실패 쪽 | 정상 쪽 |
+|---|---|---|
+| 인스턴스 타입 · 볼륨 제한 | `run-instances --dry-run` `t3.small` → 명시적 거부 | 같은 명령 `t3.micro` → `DryRunOperation` (`--dry-run` 이라 리소스는 만들지 않는다) |
+| v3 (SSM 세션 종료) | 수정 전 `terminate-session` → `AccessDenied` | 수정 후 **같은 명령 · 같은 세션** → 성공, 세션 `Terminated` |
+| v4 (Route 53 이름 제한) | — | ACM 검증 CNAME 과 `m12` 별칭 A 레코드 생성 성공 |
+| v5 (`AddListenerCertificates`) | 반영 전이라면 `AccessDenied` 로 판단 | 없는 리스너 ARN 에 호출 → `ListenerNotFound` (권한 통과, 리소스 변경 없음) → [T-ALB](docs/troubleshooting.md#t-alb--https-리스너-추가가-accessdenied-후-롤백) |
 ## 확장 구성 (2단계)
 
 ![2단계 확장 구성](docs/architecture-extended.png)
@@ -263,7 +300,6 @@ docker run -d --name web --restart unless-stopped \
 - 가린 값: 계정 ID → `************`, 교육장 공인 IP → `x.x.x.x`, 다른 네트워크 시험 때의 IP → `y.y.y.y`.
   EC2 공인 IP 와 리소스 ID 는 정리 때 반납 · 삭제되므로 그대로 두었다. 도메인도 공개 정보라 그대로 두었다(도메인은 유지하고 실습 레코드만 지운다).
 - 대부분의 리소스에 태그 `Project=m12` 를 붙였다(빠진 것: `lab-vpc` · `lab-public` · HTTPS 리스너). SSM 접속 권한이 이 태그에 묶여 있어 `lab-web` 에는 꼭 필요했다.
-
 ## 폴더 구조
 
 ```
